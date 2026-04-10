@@ -105,8 +105,9 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
                 X_tr, X_val = X_cv_scaled[tr_idx], X_cv_scaled[val_idx]
                 y_tr, y_val = y_cv[tr_idx],         y_cv[val_idx]
 
+                # LDA: eigen solver + Ledoit-Wolf shrinkage for high-dim stability
                 reducer = (PCA(n_components=n_pca) if tech == "PCA"
-                           else LDA(n_components=1))
+                           else LDA(n_components=1, solver="eigen", shrinkage="auto"))
                 X_tr_r  = reducer.fit_transform(X_tr, y_tr)
                 X_val_r = reducer.transform(X_val)
 
@@ -136,7 +137,10 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
         ax.set_xlabel("Number of Trees")
         ax.set_ylabel("5-fold CV Accuracy")
         ax.legend(fontsize=9)
-        ax.set_ylim(0.5, 1.05)
+        # Adaptive ylim: zoom in on actual variation so the curve isn't flat
+        y_lo = max(0.0, float((mean_accs - std_accs).min()) - 0.04)
+        y_hi = min(1.02, float((mean_accs + std_accs).max()) + 0.04)
+        ax.set_ylim(y_lo, y_hi)
 
     plt.suptitle("Random Forest - Tree-Count Sensitivity",
                  fontsize=14, fontweight="bold")

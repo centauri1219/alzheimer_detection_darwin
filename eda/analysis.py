@@ -43,7 +43,7 @@ def run_eda(X_cv: pd.DataFrame, y_cv, df_eda: pd.DataFrame):
     -------
     correlations : pd.Series - Pearson r of every feature with the target label
     """
-    print("\n== EDA ==========================================================")
+    print("\n== EDA ==================================================")
 
     # -- 3.1 Class distribution ------------------------------------------------
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -176,48 +176,16 @@ def run_eda(X_cv: pd.DataFrame, y_cv, df_eda: pd.DataFrame):
     plt.tight_layout()
     save_fig(fig, "eda_06_feature_group_analysis.png")
 
-    # -- 3.10 Signal spread & variability --------------------------------------
-    subject_mean = X_cv.mean(axis=1)
-    fig, axes    = plt.subplots(1, 2, figsize=(16, 6))
-
-    for lbl, color, val in zip(["Healthy", "Alzheimer"], COLORS, [0, 1]):
-        mask = y_cv == val
-        axes[0].hist(subject_mean[mask], bins=25, color=color, alpha=0.6,
-                     label=lbl, edgecolor="white", density=True)
-        axes[0].axvline(subject_mean[mask].mean(), color=color,
-                        linestyle="--", linewidth=2, label=f"{lbl} mean")
-    axes[0].set_title("3.10a - Distribution of Per-Subject Feature Mean",
-                      fontsize=12, fontweight="bold")
-    axes[0].set_xlabel("Mean Feature Value")
-    axes[0].legend(fontsize=8)
-
-    iqr_h = X_cv[y_cv == 0].apply(
-        lambda c: c.quantile(0.75) - c.quantile(0.25))
-    iqr_a = X_cv[y_cv == 1].apply(
-        lambda c: c.quantile(0.75) - c.quantile(0.25))
-    axes[1].scatter(iqr_h, iqr_a, alpha=0.35, s=15, color="#7B68EE")
-    lim = max(iqr_h.max(), iqr_a.max()) * 1.05
-    axes[1].plot([0, lim], [0, lim], "r--", linewidth=1.2, label="Equal IQR")
-    axes[1].set_title(
-        "3.10b - IQR Comparison per Feature (Healthy vs Alzheimer)",
-        fontsize=12, fontweight="bold")
-    axes[1].set_xlabel("IQR - Healthy")
-    axes[1].set_ylabel("IQR - Alzheimer")
-    axes[1].legend()
-
-    plt.suptitle("3.10 - Signal Spread & Variability Analysis",
-                 fontsize=14, fontweight="bold")
-    plt.tight_layout()
-    save_fig(fig, "eda_07_signal_spread.png")
-
     # -- 3.9 PCA & LDA projections ---------------------------------------------
+    # NOTE: eda_07 (signal spread / IQR scatter) was removed – not informative.
     scaler_eda = StandardScaler()
     X_cv_sc    = scaler_eda.fit_transform(X_cv)
 
     pca_model = PCA(n_components=2)
     pca2      = pca_model.fit_transform(X_cv_sc)
 
-    lda_model = LDA(n_components=1)
+    # Use eigen solver + Ledoit-Wolf shrinkage for well-conditioned LDA
+    lda_model = LDA(n_components=1, solver="eigen", shrinkage="auto")
     lda1      = lda_model.fit_transform(X_cv_sc, y_cv).flatten()
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
@@ -250,7 +218,7 @@ def run_eda(X_cv: pd.DataFrame, y_cv, df_eda: pd.DataFrame):
     plt.suptitle("3.9 - Dimensionality Reduction: Cluster Separation",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    save_fig(fig, "eda_08_pca_lda_projections.png")
+    save_fig(fig, "eda_07_pca_lda_projections.png")
 
     # -- 3.12 Pairplot – top 4 features ---------------------------------------
     top4  = correlations.abs().nlargest(4).index.tolist()
@@ -263,7 +231,7 @@ def run_eda(X_cv: pd.DataFrame, y_cv, df_eda: pd.DataFrame):
     )
     g.fig.suptitle("3.12 - Pairplot: Top 4 Discriminating Features",
                    fontsize=14, fontweight="bold", y=1.02)
-    save_fig(g.fig, "eda_09_pairplot_top4.png")
+    save_fig(g.fig, "eda_08_pairplot_top4.png")
 
-    print("EDA complete - 9 plots saved.\n")
+    print("EDA complete - 8 plots saved.\n")
     return correlations

@@ -36,8 +36,13 @@ from models.mlp_model import train_and_predict as mlp_predict
 # -- internal helpers ----------------------------------------------------------
 
 def _get_reducer(tech: str, n_pca: int):
+    """
+    Return a fresh reducer.
+    LDA: eigen solver + Ledoit-Wolf shrinkage to handle high-dimensional data
+    where the within-class scatter matrix becomes near-singular with default SVD.
+    """
     return (PCA(n_components=n_pca) if tech == "PCA"
-            else LDA(n_components=1))
+            else LDA(n_components=1, solver="eigen", shrinkage="auto"))
 
 
 def _fit_models(X_tr, y_tr, n_pca):
@@ -144,7 +149,7 @@ def plot_comparisons(df_cv, df_holdout,
     """Generate and save all comparison plots."""
     print("\n== Generating Comparison Plots ==================================")
 
-    # -- eval_01 CV accuracy bar ------------------------------------------------
+    # -- eval_01: CV bar (left) + individual fold strip plot (right) ----------
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
     sns.barplot(x="Model", y="Accuracy", hue="Technique",
@@ -154,29 +159,33 @@ def plot_comparisons(df_cv, df_holdout,
                     alpha=0.5, label="90% line")
     axes[0].set_title("CV Accuracy: PCA vs LDA",
                       fontsize=13, fontweight="bold")
-    axes[0].set_ylim(0.5, 1.05)
+    axes[0].set_ylim(0.0, 1.05)
     axes[0].legend()
 
-    sns.boxplot(x="Model", y="Accuracy", hue="Technique",
-                data=df_cv, palette="Set3", ax=axes[1],
-                order=["KNN", "SVM", "RF", "MLP"])
-    axes[1].set_title("Accuracy Distribution (5 folds)",
+    # Strip plot shows every individual fold score (replaces box plot)
+    sns.stripplot(x="Model", y="Accuracy", hue="Technique",
+                  data=df_cv,
+                  palette={"PCA": "#2196A3", "LDA": "#E05A3A"},
+                  ax=axes[1], order=["KNN", "SVM", "RF", "MLP"],
+                  jitter=0.08, alpha=0.85, size=9, dodge=True)
+    axes[1].set_title("Individual Fold Accuracies (5 folds)",
                       fontsize=13, fontweight="bold")
-    axes[1].set_ylim(0.5, 1.05)
+    axes[1].set_ylim(0.0, 1.05)
+    axes[1].set_ylabel("Accuracy per fold")
 
     plt.suptitle("7. - Cross-Validation Results (All 4 Models)",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    save_fig(fig, "eval_01_cv_accuracy_bar_box.png")
+    save_fig(fig, "eval_01_cv_accuracy_bar_strip.png")
 
-    # -- eval_02 Holdout heatmap ------------------------------------------------
+    # -- eval_02 Holdout heatmap -----------------------------------------------
     pivot = df_holdout.pivot(index="Model", columns="Technique",
                              values="Holdout_Accuracy")
     pivot = pivot.loc[["KNN", "SVM", "RF", "MLP"]]
 
     fig, ax = plt.subplots(figsize=(7, 5))
     sns.heatmap(pivot, annot=True, fmt=".4f", cmap="YlGnBu",
-                vmin=0.7, vmax=1.0, linewidths=0.5,
+                vmin=0.0, vmax=1.0, linewidths=0.5,       # vmin=0 to show LDA
                 annot_kws={"size": 13, "weight": "bold"}, ax=ax)
     ax.set_title("Holdout Accuracy - All Models × Reduction Technique",
                  fontsize=13, fontweight="bold", pad=12)
@@ -253,32 +262,29 @@ def plot_comparisons(df_cv, df_holdout,
     plt.tight_layout()
     save_fig(fig, "eval_04_decision_boundaries.png")
 
-    # -- eval_05 Model summary comparison (grouped bar + radar) ---------------
-    # Compute summary: best accuracy per model (max over PCA/LDA)
+    # -- eval_05 Model summary – y-axis starts at 0 to show LDA fairly --------
     cv_summary = (df_cv.groupby(["Model", "Technique"])["Accuracy"]
                   .mean().reset_index())
     ho_summary = df_holdout.copy()
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 6))
 
-    # -- grouped bar: CV mean accuracy
     sns.barplot(x="Model", y="Accuracy", hue="Technique",
                 data=cv_summary, palette=["#2196A3", "#E05A3A"],
                 ax=axes[0], order=["KNN", "SVM", "RF", "MLP"])
     axes[0].axhline(0.90, color="gray", linestyle=":", alpha=0.7)
     axes[0].set_title("Mean CV Accuracy by Model & Reduction",
                       fontsize=13, fontweight="bold")
-    axes[0].set_ylim(0.6, 1.05)
+    axes[0].set_ylim(0.0, 1.05)      # starts at 0 so LDA isn't hidden
     axes[0].set_ylabel("5-fold CV Accuracy")
 
-    # -- grouped bar: holdout accuracy
     sns.barplot(x="Model", y="Holdout_Accuracy", hue="Technique",
                 data=ho_summary, palette=["#2196A3", "#E05A3A"],
                 ax=axes[1], order=["KNN", "SVM", "RF", "MLP"])
     axes[1].axhline(0.90, color="gray", linestyle=":", alpha=0.7)
     axes[1].set_title("Holdout Accuracy by Model & Reduction",
                       fontsize=13, fontweight="bold")
-    axes[1].set_ylim(0.6, 1.05)
+    axes[1].set_ylim(0.0, 1.05)      # starts at 0 so LDA isn't hidden
     axes[1].set_ylabel("Holdout Accuracy")
 
     plt.suptitle("All-Model Performance Summary - CV vs Holdout",
@@ -286,37 +292,41 @@ def plot_comparisons(df_cv, df_holdout,
     plt.tight_layout()
     save_fig(fig, "eval_05_model_summary_cv_holdout.png")
 
-    # -- eval_06 Radar chart ---------------------------------------------------
+    # -- eval_06 Grouped bar: best CV vs Holdout per model (replaces radar) ---
     models_order = ["KNN", "SVM", "RF", "MLP"]
-    # Use best (max PCA/LDA) CV accuracy and holdout accuracy per model
-    cv_best  = (df_cv.groupby(["Model", "Technique"])["Accuracy"]
-                .mean().groupby("Model").max())
-    ho_best  = df_holdout.groupby("Model")["Holdout_Accuracy"].max()
+    cv_best = (df_cv.groupby(["Model", "Technique"])["Accuracy"]
+               .mean().groupby("Model").max())
+    ho_best = df_holdout.groupby("Model")["Holdout_Accuracy"].max()
 
-    categories   = ["CV Accuracy", "Holdout Accuracy"]
-    model_colors = ["#2196A3", "#E05A3A", "#4CAF50", "#9C27B0"]
-    angles       = np.linspace(0, 2 * np.pi, len(categories),
-                               endpoint=False).tolist()
-    angles      += angles[:1]          # close the polygon
+    cv_vals = [cv_best.get(m, 0) for m in models_order]
+    ho_vals = [ho_best.get(m, 0) for m in models_order]
+    x       = np.arange(len(models_order))
+    width   = 0.35
 
-    fig, ax = plt.subplots(figsize=(8, 8),
-                           subplot_kw=dict(polar=True))
-    ax.set_theta_offset(np.pi / 2)
-    ax.set_theta_direction(-1)
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(categories, fontsize=13)
-    ax.set_ylim(0.5, 1.0)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars1 = ax.bar(x - width / 2, cv_vals, width,
+                   label="Best CV Accuracy (across PCA/LDA)",
+                   color="#2196A3", alpha=0.85)
+    bars2 = ax.bar(x + width / 2, ho_vals, width,
+                   label="Best Holdout Accuracy (across PCA/LDA)",
+                   color="#E05A3A", alpha=0.85)
 
-    for m, col in zip(models_order, model_colors):
-        vals  = [cv_best.get(m, 0), ho_best.get(m, 0)]
-        vals += vals[:1]
-        ax.plot(angles, vals, "o-", linewidth=2, color=col, label=m)
-        ax.fill(angles, vals, alpha=0.12, color=col)
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2., h + 0.005,
+                f"{h:.3f}", ha="center", va="bottom",
+                fontsize=9, fontweight="bold")
 
-    ax.set_title("Radar: CV vs Holdout Accuracy",
-                 fontsize=14, fontweight="bold", pad=20)
-    ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.15), fontsize=11)
+    ax.set_xticks(x)
+    ax.set_xticklabels(models_order, fontsize=12)
+    ax.set_ylim(0.0, 1.12)
+    ax.axhline(0.90, color="gray", linestyle=":", alpha=0.7, linewidth=1.5,
+               label="90% threshold")
+    ax.set_ylabel("Accuracy", fontsize=12)
+    ax.set_title("Model Comparison: Best CV vs Best Holdout Accuracy",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=10)
     plt.tight_layout()
-    save_fig(fig, "eval_06_radar_cv_vs_holdout.png")
+    save_fig(fig, "eval_06_cv_vs_holdout_bar.png")
 
     print("Comparison plots complete - 6 plots saved.")

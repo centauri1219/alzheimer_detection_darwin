@@ -55,8 +55,9 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
                 X_tr, X_val = X_cv_scaled[tr_idx], X_cv_scaled[val_idx]
                 y_tr, y_val = y_cv[tr_idx],         y_cv[val_idx]
 
+                # LDA: eigen solver + Ledoit-Wolf shrinkage to handle high-dim data
                 reducer = (PCA(n_components=n_pca) if tech == "PCA"
-                           else LDA(n_components=1))
+                           else LDA(n_components=1, solver="eigen", shrinkage="auto"))
                 X_tr_r  = reducer.fit_transform(X_tr, y_tr)
                 X_val_r = reducer.transform(X_val)
 
@@ -84,16 +85,19 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
         ax.set_xlabel("C (regularisation strength, log scale)")
         ax.set_ylabel("5-fold CV Accuracy")
         ax.legend(fontsize=9)
-        ax.set_ylim(0.5, 1.05)
+        # Adaptive ylim: zoom in on actual variation
+        y_lo = max(0.0, float((mean_accs - std_accs).min()) - 0.04)
+        y_hi = min(1.02, float((mean_accs + std_accs).max()) + 0.04)
+        ax.set_ylim(y_lo, y_hi)
 
     plt.suptitle("SVM - Regularisation Sensitivity (Linear Kernel)",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
     save_fig(fig, "model_svm_C_sweep.png")
 
-    # -- kernel comparison ------------------------------------------------------
+    # -- kernel comparison (bar + std error bars) ------------------------------
     kernels = ["linear", "rbf", "poly"]
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     for ax, tech in zip(axes, ["PCA", "LDA"]):
         kernel_accs = {k: [] for k in kernels}
@@ -103,7 +107,7 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
                 y_tr, y_val = y_cv[tr_idx],         y_cv[val_idx]
 
                 reducer = (PCA(n_components=n_pca) if tech == "PCA"
-                           else LDA(n_components=1))
+                           else LDA(n_components=1, solver="eigen", shrinkage="auto"))
                 X_tr_r  = reducer.fit_transform(X_tr, y_tr)
                 X_val_r = reducer.transform(X_val)
 
@@ -111,17 +115,25 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
                 svm.fit(X_tr_r, y_tr)
                 kernel_accs[k].append(accuracy_score(y_val, svm.predict(X_val_r)))
 
-        ax.boxplot(
-            [kernel_accs[k] for k in kernels],
-            labels=kernels,
-            patch_artist=True,
-            boxprops=dict(facecolor="#E05A3A", alpha=0.5),
-            medianprops=dict(color="#2196A3", linewidth=2),
-        )
+        kernel_colors = {"linear": "#E05A3A", "rbf": "#4CAF50", "poly": "#9C27B0"}
+        means = [np.mean(kernel_accs[k]) for k in kernels]
+        stds  = [np.std(kernel_accs[k], ddof=1) for k in kernels]
+
+        bars = ax.bar(kernels, means,
+                      yerr=stds, capsize=10,
+                      color=[kernel_colors[k] for k in kernels], alpha=0.82,
+                      error_kw=dict(linewidth=2, ecolor="dimgray"))
+        for bar, m in zip(bars, means):
+            ax.text(bar.get_x() + bar.get_width() / 2.,
+                    m + max(stds) * 0.15 + 0.005,
+                    f"{m:.3f}", ha="center", va="bottom",
+                    fontsize=12, fontweight="bold")
+
         ax.set_title(f"SVM: Kernel Comparison ({tech})",
                      fontsize=12, fontweight="bold")
-        ax.set_ylabel("5-fold CV Accuracy")
-        ax.set_ylim(0.5, 1.05)
+        ax.set_ylabel("5-fold CV Accuracy (mean ± std)")
+        y_top = min(1.05, max(means) + max(stds) + 0.08)
+        ax.set_ylim(0.0, y_top)
 
     plt.suptitle("SVM - Kernel Comparison",
                  fontsize=14, fontweight="bold")

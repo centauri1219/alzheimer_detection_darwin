@@ -25,6 +25,7 @@ Alzheimer's disease can subtly alter fine motor control, making handwriting anal
 | **Instances** | 174 subjects (89 Healthy, 85 Alzheimer's) |
 | **Features** | 451 kinematic handwriting features (air time, pressure, stroke velocity, etc.) |
 | **Task** | Binary classification (Healthy / Alzheimer's) |
+| **Storage** | Locally stored at data.csv |
 
 ### Models
 

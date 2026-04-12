@@ -1,4 +1,4 @@
-# 🧠 Handwriting-Based Alzheimer's Disease Detection
+# Handwriting-Based Alzheimer's Disease Detection
 
 > A machine-learning pipeline that classifies **Healthy** vs **Alzheimer's** subjects from kinematic handwriting features, using the [DARWIN dataset](https://archive.ics.uci.edu/dataset/732/darwin) from the UCI Machine Learning Repository.
 

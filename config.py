@@ -11,8 +11,11 @@ from pathlib import Path
 # -- Paths ---------------------------------------------------------------------
 ROOT_DIR  = Path(__file__).parent
 DATA_PATH = ROOT_DIR / "data.csv"
-PLOTS_DIR = ROOT_DIR / "plots"
+PLOTS_DIR   = ROOT_DIR / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
+
+WEIGHTS_DIR = ROOT_DIR / "weights"
+WEIGHTS_DIR.mkdir(exist_ok=True)
 
 # -- Reproducibility -----------------------------------------------------------
 SEED = 42

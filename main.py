@@ -83,7 +83,7 @@ def main():
     # -- Done ------------------------------------------------------------------
     elapsed = time.time() - t0
     print("\n" + "=" * 65)
-    print(f"  All done in {elapsed:.1f}s")
+    print(f"  completed in {elapsed:.1f}s")
     print(f"  Plots saved to: {PLOTS_DIR}")
     print("=" * 65)
 

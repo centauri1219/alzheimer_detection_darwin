@@ -18,7 +18,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedKFold
 
-from config import SEED, save_fig
+from config import SEED, WEIGHTS_DIR, save_fig
 
 # -- device --------------------------------------------------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,13 +42,33 @@ class HandwritingMLP(nn.Module):
 # -- public helpers ------------------------------------------------------------
 
 def train_and_predict_proba(X_tr, y_tr, X_te, epochs=150, lr=0.002,
-                            n_runs=5):
+                            n_runs=5, weights_path=None):
     """Train the MLP *n_runs* times and return probabilities from the best run
     (lowest final training loss). This reduces variance from random weight
-    initialisation and consistently reaches peak performance."""
+    initialisation and consistently reaches peak performance.
+
+    If *weights_path* points to an existing .pt file the training step is
+    skipped entirely and the saved weights are loaded instead.  When the file
+    does not yet exist the best-run state dict is saved there after training so
+    future calls are instant.
+    """
+    from pathlib import Path
+
+    X_te_t = torch.FloatTensor(X_te).to(device)
+
+    # -- load cached weights if available --------------------------------------
+    if weights_path and Path(weights_path).exists():
+        model = HandwritingMLP(X_tr.shape[1]).to(device)
+        model.load_state_dict(
+            torch.load(weights_path, map_location=device, weights_only=True))
+        model.eval()
+        with torch.no_grad():
+            logits = model(X_te_t)
+            return torch.softmax(logits, dim=1).cpu().numpy()
+
+    # -- train from scratch ----------------------------------------------------
     X_tr_t = torch.FloatTensor(X_tr).to(device)
     y_tr_t = torch.LongTensor(y_tr).to(device)
-    X_te_t = torch.FloatTensor(X_te).to(device)
 
     # Make the ensemble of runs deterministic so accuracy is consistent
     torch.manual_seed(SEED)
@@ -56,6 +76,7 @@ def train_and_predict_proba(X_tr, y_tr, X_te, epochs=150, lr=0.002,
 
     best_loss  = float("inf")
     best_probs = None
+    best_state = None
 
     for run in range(n_runs):
         model = HandwritingMLP(X_tr.shape[1]).to(device)
@@ -71,24 +92,43 @@ def train_and_predict_proba(X_tr, y_tr, X_te, epochs=150, lr=0.002,
 
         final_loss = loss.item()
         if final_loss < best_loss:
-            best_loss = final_loss
+            best_loss  = final_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             model.eval()
             with torch.no_grad():
                 logits = model(X_te_t)
                 best_probs = torch.softmax(logits, dim=1).cpu().numpy()
 
+    # -- save weights if a path was requested ----------------------------------
+    if weights_path and best_state is not None:
+        Path(weights_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(best_state, weights_path)
+        print(f"  [saved] MLP weights -> {Path(weights_path).name}")
+
     return best_probs
 
 
-def train_and_predict(X_tr, y_tr, X_te, epochs=150, lr=0.002):
+def train_and_predict(X_tr, y_tr, X_te, epochs=150, lr=0.002,
+                      weights_path=None):
     """Train a fresh MLP and return hard class predictions (argmax of probabilities)."""
-    return train_and_predict_proba(X_tr, y_tr, X_te, epochs, lr).argmax(axis=1)
+    return train_and_predict_proba(
+        X_tr, y_tr, X_te, epochs, lr,
+        weights_path=weights_path,
+    ).argmax(axis=1)
 
 
 # -- individual analysis -------------------------------------------------------
 
-def _record_loss_curve(X_tr, y_tr, epochs=200, lr=0.002):
-    """Return per-epoch training loss for one run."""
+def _record_loss_curve(X_tr, y_tr, epochs=200, lr=0.002, losses_path=None):
+    """Return per-epoch training loss for one run.
+
+    If *losses_path* points to an existing .npy file the cached array is
+    returned immediately, skipping all training.
+    """
+    from pathlib import Path
+    if losses_path and Path(losses_path).exists():
+        return list(np.load(losses_path))
+
     X_t = torch.FloatTensor(X_tr).to(device)
     y_t = torch.LongTensor(y_tr).to(device)
     model = HandwritingMLP(X_tr.shape[1]).to(device)
@@ -100,6 +140,10 @@ def _record_loss_curve(X_tr, y_tr, epochs=200, lr=0.002):
         loss = crit(model(X_t), y_t)
         loss.backward(); opt.step()
         losses.append(loss.item())
+
+    if losses_path:
+        WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+        np.save(losses_path, np.array(losses))
     return losses
 
 
@@ -122,7 +166,8 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
         reducer = (PCA(n_components=n_pca) if tech == "PCA"
                    else LDA(n_components=1, solver="eigen", shrinkage="auto"))
         X_r = reducer.fit_transform(X_cv_scaled, y_cv)
-        losses = _record_loss_curve(X_r, y_cv, epochs=200)
+        lp = str(WEIGHTS_DIR / f"mlp_{tech.lower()}_losses.npy")
+        losses = _record_loss_curve(X_r, y_cv, epochs=200, losses_path=lp)
 
         ax.plot(losses, color="#9C27B0", linewidth=2)
         ax.set_title(f"MLP Training Loss Curve ({tech})",
@@ -140,27 +185,34 @@ def analyze(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout, n_pca, le):
     fig, axes  = plt.subplots(1, 2, figsize=(14, 5))
 
     for ax, tech in zip(axes, ["PCA", "LDA"]):
-        mean_accs, std_accs = [], []
-        for ep in epoch_vals:
-            fold_accs = []
-            for tr_idx, val_idx in skf.split(X_cv_scaled, y_cv):
-                X_tr, X_val = X_cv_scaled[tr_idx], X_cv_scaled[val_idx]
-                y_tr, y_val = y_cv[tr_idx],         y_cv[val_idx]
+        cache = WEIGHTS_DIR / f"mlp_{tech.lower()}_epoch_sens.npz"
+        if cache.exists():
+            data      = np.load(cache)
+            mean_accs = data["mean"]
+            std_accs  = data["std"]
+        else:
+            mean_accs, std_accs = [], []
+            for ep in epoch_vals:
+                fold_accs = []
+                for tr_idx, val_idx in skf.split(X_cv_scaled, y_cv):
+                    X_tr, X_val = X_cv_scaled[tr_idx], X_cv_scaled[val_idx]
+                    y_tr, y_val = y_cv[tr_idx],         y_cv[val_idx]
 
-                # LDA: eigen solver + Ledoit-Wolf shrinkage for high-dim stability
-                reducer = (PCA(n_components=n_pca) if tech == "PCA"
-                           else LDA(n_components=1, solver="eigen", shrinkage="auto"))
-                X_tr_r  = reducer.fit_transform(X_tr, y_tr)
-                X_val_r = reducer.transform(X_val)
+                    # LDA: eigen solver + Ledoit-Wolf shrinkage for high-dim stability
+                    reducer = (PCA(n_components=n_pca) if tech == "PCA"
+                               else LDA(n_components=1, solver="eigen", shrinkage="auto"))
+                    X_tr_r  = reducer.fit_transform(X_tr, y_tr)
+                    X_val_r = reducer.transform(X_val)
 
-                preds = train_and_predict(X_tr_r, y_tr, X_val_r, epochs=ep)
-                fold_accs.append(accuracy_score(y_val, preds))
+                    preds = train_and_predict(X_tr_r, y_tr, X_val_r, epochs=ep)
+                    fold_accs.append(accuracy_score(y_val, preds))
 
-            mean_accs.append(np.mean(fold_accs))
-            std_accs.append(np.std(fold_accs))
+                mean_accs.append(np.mean(fold_accs))
+                std_accs.append(np.std(fold_accs))
 
-        mean_accs = np.array(mean_accs)
-        std_accs  = np.array(std_accs)
+            mean_accs = np.array(mean_accs)
+            std_accs  = np.array(std_accs)
+            np.savez(cache, mean=mean_accs, std=std_accs)
 
         ax.plot(epoch_vals, mean_accs, marker="s", markersize=6,
                 color="#9C27B0", linewidth=2, label="CV mean accuracy")

@@ -29,7 +29,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-from config import COLORS, PALETTE, SEED, save_fig
+from config import COLORS, PALETTE, SEED, WEIGHTS_DIR, save_fig
 from models.mlp_model import train_and_predict as mlp_predict
 from models.mlp_model import train_and_predict_proba as mlp_predict_proba
 
@@ -108,38 +108,77 @@ def run_cv(X_cv_scaled, y_cv, n_pca: int) -> pd.DataFrame:
 
 def run_holdout(X_cv_scaled, y_cv, X_holdout_scaled, y_holdout,
                 n_pca: int, le) -> pd.DataFrame:
-    """Final holdout evaluation for all 4 models × PCA/LDA."""
+    """Final holdout evaluation for all 4 models x PCA/LDA.
+
+    Reports both holdout accuracy and ROC AUC, saves MLP weights so that
+    subsequent calls inside plot_comparisons skip retraining.
+    """
     print("\n== Holdout Evaluation ===========================================")
     rows = []
 
     for tech in ["PCA", "LDA"]:
-        reducer    = _get_reducer(tech, n_pca)
-        X_cv_r     = reducer.fit_transform(X_cv_scaled, y_cv)
-        X_ho_r     = reducer.transform(X_holdout_scaled)
+        reducer = _get_reducer(tech, n_pca)
+        X_cv_r  = reducer.fit_transform(X_cv_scaled, y_cv)
+        X_ho_r  = reducer.transform(X_holdout_scaled)
 
         knn = KNeighborsClassifier(n_neighbors=5, weights="distance").fit(X_cv_r, y_cv)
-        svm = SVC(kernel="linear", C=0.5).fit(X_cv_r, y_cv)
+        # probability=True needed for AUC; does not change hard predictions
+        svm = SVC(kernel="linear", C=0.5, probability=True,
+                  random_state=SEED).fit(X_cv_r, y_cv)
         rf  = RandomForestClassifier(n_estimators=200, random_state=SEED,
                                      n_jobs=-1).fit(X_cv_r, y_cv)
 
-        for model_name, preds in [
-            ("KNN",  knn.predict(X_ho_r)),
-            ("SVM",  svm.predict(X_ho_r)),
-            ("RF",   rf.predict(X_ho_r)),
-            ("MLP",  mlp_predict(X_cv_r, y_cv, X_ho_r)),
+        # Train MLP once, cache weights to weights/mlp_{pca|lda}.pt
+        wp = WEIGHTS_DIR / f"mlp_{tech.lower()}.pt"
+        mlp_proba_arr = mlp_predict_proba(X_cv_r, y_cv, X_ho_r,
+                                          weights_path=str(wp))
+
+        for model_name, preds, proba_pos in [
+            ("KNN", knn.predict(X_ho_r),          knn.predict_proba(X_ho_r)[:, 1]),
+            ("SVM", svm.predict(X_ho_r),          svm.predict_proba(X_ho_r)[:, 1]),
+            ("RF",  rf.predict(X_ho_r),           rf.predict_proba(X_ho_r)[:, 1]),
+            ("MLP", mlp_proba_arr.argmax(axis=1), mlp_proba_arr[:, 1]),
         ]:
+            fpr_, tpr_, _ = roc_curve(y_holdout, proba_pos)
             rows.append({
-                "Technique":       tech,
-                "Model":           model_name,
+                "Technique":        tech,
+                "Model":            model_name,
                 "Holdout_Accuracy": accuracy_score(y_holdout, preds),
+                "AUC":              auc(fpr_, tpr_),
             })
 
     df_holdout = pd.DataFrame(rows)
+
+    print("\n-- Holdout Accuracy ---------------------------------------------")
     print(df_holdout.pivot(index="Model", columns="Technique",
                            values="Holdout_Accuracy").round(4))
-    best = df_holdout.loc[df_holdout["Holdout_Accuracy"].idxmax()]
-    print(f"\nBest: {best['Model']} + {best['Technique']} "
-          f"-> Holdout accuracy: {best['Holdout_Accuracy']:.4f}")
+
+    print("\n-- Holdout ROC AUC ----------------------------------------------")
+    print(df_holdout.pivot(index="Model", columns="Technique",
+                           values="AUC").round(4))
+
+    best_acc = df_holdout.loc[df_holdout["Holdout_Accuracy"].idxmax()]
+    best_auc = df_holdout.loc[df_holdout["AUC"].idxmax()]
+
+    print(f"\nBest (Accuracy): {best_acc['Model']} + {best_acc['Technique']} "
+          f"-> {best_acc['Holdout_Accuracy']:.4f}")
+    print(f"Best (AUC):      {best_auc['Model']} + {best_auc['Technique']} "
+          f"-> AUC {best_auc['AUC']:.4f}")
+
+    agree = (best_acc["Model"] == best_auc["Model"] and
+             best_acc["Technique"] == best_auc["Technique"])
+    if agree:
+        print(f"\nFinal Best Model: {best_auc['Model']} + {best_auc['Technique']} "
+              f"(both metrics agree; "
+              f"Accuracy={best_auc['Holdout_Accuracy']:.4f}, AUC={best_auc['AUC']:.4f})")
+    else:
+        print(f"\nFinal Best Model: {best_auc['Model']} + {best_auc['Technique']} "
+              f"[chosen by AUC - preferred metric for clinical classification] "
+              f"(Accuracy={best_auc['Holdout_Accuracy']:.4f}, AUC={best_auc['AUC']:.4f})")
+        print(f"  Note: accuracy-best was "
+              f"{best_acc['Model']} + {best_acc['Technique']} "
+              f"({best_acc['Holdout_Accuracy']:.4f})")
+
     return df_holdout
 
 
@@ -205,7 +244,8 @@ def plot_comparisons(df_cv, df_holdout,
     svm = SVC(kernel="linear", C=0.5).fit(X_cv_r, y_cv)
     rf  = RandomForestClassifier(n_estimators=200, random_state=SEED,
                                  n_jobs=-1).fit(X_cv_r, y_cv)
-    mlp_preds = mlp_predict(X_cv_r, y_cv, X_ho_r)
+    mlp_preds = mlp_predict(X_cv_r, y_cv, X_ho_r,
+                            weights_path=str(WEIGHTS_DIR / f"mlp_{best_tech.lower()}.pt"))
 
     all_preds  = [knn.predict(X_ho_r), svm.predict(X_ho_r),
                   rf.predict(X_ho_r), mlp_preds]
@@ -247,7 +287,8 @@ def plot_comparisons(df_cv, df_holdout,
     Z_knn = knn_2d.predict(mesh).reshape(xx.shape)
     Z_svm = svm_2d.predict(mesh).reshape(xx.shape)
     Z_rf  = rf_2d.predict(mesh).reshape(xx.shape)
-    Z_mlp = mlp_predict(X_cv_2d, y_cv, mesh).reshape(xx.shape)
+    Z_mlp = mlp_predict(X_cv_2d, y_cv, mesh,
+                        weights_path=str(WEIGHTS_DIR / "mlp_pca2d.pt")).reshape(xx.shape)
 
     fig, axes = plt.subplots(1, 4, figsize=(22, 5))
     for ax, m, Z in zip(axes, model_lbls, [Z_knn, Z_svm, Z_rf, Z_mlp]):
@@ -326,7 +367,9 @@ def plot_comparisons(df_cv, df_holdout,
         rf_proba = rf_p.predict_proba(X_ho_r)[:, 1]
 
         # MLP - softmax probabilities
-        mlp_proba = mlp_predict_proba(X_cv_r, y_cv, X_ho_r)[:, 1]
+        mlp_proba = mlp_predict_proba(
+            X_cv_r, y_cv, X_ho_r,
+            weights_path=str(WEIGHTS_DIR / f"mlp_{tech.lower()}.pt"))[:, 1]
 
         # Plot each model's ROC
         for name, proba in [("KNN", knn_proba), ("SVM", svm_proba),

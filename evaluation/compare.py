@@ -24,13 +24,14 @@ import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import accuracy_score, auc, confusion_matrix, roc_curve
 from sklearn.model_selection import StratifiedKFold
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 from config import COLORS, PALETTE, SEED, save_fig
 from models.mlp_model import train_and_predict as mlp_predict
+from models.mlp_model import train_and_predict_proba as mlp_predict_proba
 
 
 # -- internal helpers ----------------------------------------------------------
@@ -262,36 +263,6 @@ def plot_comparisons(df_cv, df_holdout,
     plt.tight_layout()
     save_fig(fig, "eval_04_decision_boundaries.png")
 
-    # -- eval_05 Model summary – y-axis starts at 0 to show LDA fairly --------
-    cv_summary = (df_cv.groupby(["Model", "Technique"])["Accuracy"]
-                  .mean().reset_index())
-    ho_summary = df_holdout.copy()
-
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
-
-    sns.barplot(x="Model", y="Accuracy", hue="Technique",
-                data=cv_summary, palette=["#2196A3", "#E05A3A"],
-                ax=axes[0], order=["KNN", "SVM", "RF", "MLP"])
-    axes[0].axhline(0.90, color="gray", linestyle=":", alpha=0.7)
-    axes[0].set_title("Mean CV Accuracy by Model & Reduction",
-                      fontsize=13, fontweight="bold")
-    axes[0].set_ylim(0.0, 1.05)      # starts at 0 so LDA isn't hidden
-    axes[0].set_ylabel("5-fold CV Accuracy")
-
-    sns.barplot(x="Model", y="Holdout_Accuracy", hue="Technique",
-                data=ho_summary, palette=["#2196A3", "#E05A3A"],
-                ax=axes[1], order=["KNN", "SVM", "RF", "MLP"])
-    axes[1].axhline(0.90, color="gray", linestyle=":", alpha=0.7)
-    axes[1].set_title("Holdout Accuracy by Model & Reduction",
-                      fontsize=13, fontweight="bold")
-    axes[1].set_ylim(0.0, 1.05)      # starts at 0 so LDA isn't hidden
-    axes[1].set_ylabel("Holdout Accuracy")
-
-    plt.suptitle("All-Model Performance Summary - CV vs Holdout",
-                 fontsize=15, fontweight="bold")
-    plt.tight_layout()
-    save_fig(fig, "eval_05_model_summary_cv_holdout.png")
-
     # -- eval_06 Grouped bar: best CV vs Holdout per model (replaces radar) ---
     models_order = ["KNN", "SVM", "RF", "MLP"]
     cv_best = (df_cv.groupby(["Model", "Technique"])["Accuracy"]
@@ -328,5 +299,59 @@ def plot_comparisons(df_cv, df_holdout,
     ax.legend(fontsize=10)
     plt.tight_layout()
     save_fig(fig, "eval_06_cv_vs_holdout_bar.png")
+
+    # -- eval_07 ROC Curves with AUC (PCA and LDA) ----------------------------
+    model_colors = {"KNN": "#2196A3", "SVM": "#E05A3A",
+                    "RF": "#4CAF50", "MLP": "#9C27B0"}
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    for ax, tech in zip(axes, ["PCA", "LDA"]):
+        reducer = _get_reducer(tech, n_pca)
+        X_cv_r = reducer.fit_transform(X_cv_scaled, y_cv)
+        X_ho_r = reducer.transform(X_holdout_scaled)
+
+        # KNN - predict_proba
+        knn_p = KNeighborsClassifier(n_neighbors=5, weights="distance").fit(X_cv_r, y_cv)
+        knn_proba = knn_p.predict_proba(X_ho_r)[:, 1]
+
+        # SVM - probability=True for predict_proba
+        svm_p = SVC(kernel="linear", C=0.5, probability=True,
+                    random_state=SEED).fit(X_cv_r, y_cv)
+        svm_proba = svm_p.predict_proba(X_ho_r)[:, 1]
+
+        # RF - predict_proba
+        rf_p = RandomForestClassifier(n_estimators=200, random_state=SEED,
+                                      n_jobs=-1).fit(X_cv_r, y_cv)
+        rf_proba = rf_p.predict_proba(X_ho_r)[:, 1]
+
+        # MLP - softmax probabilities
+        mlp_proba = mlp_predict_proba(X_cv_r, y_cv, X_ho_r)[:, 1]
+
+        # Plot each model's ROC
+        for name, proba in [("KNN", knn_proba), ("SVM", svm_proba),
+                            ("RF", rf_proba),   ("MLP", mlp_proba)]:
+            fpr, tpr, _ = roc_curve(y_holdout, proba)
+            roc_auc = auc(fpr, tpr)
+            ax.plot(fpr, tpr, color=model_colors[name], linewidth=2.2,
+                    label=f"{name}  (AUC = {roc_auc:.3f})")
+
+        # Diagonal reference line
+        ax.plot([0, 1], [0, 1], color="gray", linestyle="--",
+                linewidth=1.2, alpha=0.7, label="Random (AUC = 0.500)")
+
+        ax.set_xlim([-0.02, 1.02])
+        ax.set_ylim([-0.02, 1.05])
+        ax.set_xlabel("False Positive Rate", fontsize=12)
+        ax.set_ylabel("True Positive Rate", fontsize=12)
+        ax.set_title(f"ROC Curves ({tech} Reduction)",
+                     fontsize=13, fontweight="bold")
+        ax.legend(loc="lower right", fontsize=10, framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+
+    plt.suptitle("Receiver Operating Characteristic (ROC) - All Models",
+                 fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    save_fig(fig, "eval_07_roc_curves.png")
 
     print("Comparison plots complete - 6 plots saved.")

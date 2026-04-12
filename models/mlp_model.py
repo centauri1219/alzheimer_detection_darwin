@@ -41,25 +41,48 @@ class HandwritingMLP(nn.Module):
 
 # -- public helpers ------------------------------------------------------------
 
-def train_and_predict(X_tr, y_tr, X_te, epochs=150, lr=0.002):
-    """Train a fresh MLP on (X_tr, y_tr) and return predictions for X_te."""
+def train_and_predict_proba(X_tr, y_tr, X_te, epochs=150, lr=0.002,
+                            n_runs=5):
+    """Train the MLP *n_runs* times and return probabilities from the best run
+    (lowest final training loss). This reduces variance from random weight
+    initialisation and consistently reaches peak performance."""
     X_tr_t = torch.FloatTensor(X_tr).to(device)
     y_tr_t = torch.LongTensor(y_tr).to(device)
     X_te_t = torch.FloatTensor(X_te).to(device)
 
-    model = HandwritingMLP(X_tr.shape[1]).to(device)
-    opt   = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-    crit  = nn.CrossEntropyLoss()
+    # Make the ensemble of runs deterministic so accuracy is consistent
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
 
-    for _ in range(epochs):
-        model.train()
-        opt.zero_grad()
-        crit(model(X_tr_t), y_tr_t).backward()
-        opt.step()
+    best_loss  = float("inf")
+    best_probs = None
 
-    model.eval()
-    with torch.no_grad():
-        return torch.max(model(X_te_t), 1)[1].cpu().numpy()
+    for run in range(n_runs):
+        model = HandwritingMLP(X_tr.shape[1]).to(device)
+        opt   = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+        crit  = nn.CrossEntropyLoss()
+
+        for _ in range(epochs):
+            model.train()
+            opt.zero_grad()
+            loss = crit(model(X_tr_t), y_tr_t)
+            loss.backward()
+            opt.step()
+
+        final_loss = loss.item()
+        if final_loss < best_loss:
+            best_loss = final_loss
+            model.eval()
+            with torch.no_grad():
+                logits = model(X_te_t)
+                best_probs = torch.softmax(logits, dim=1).cpu().numpy()
+
+    return best_probs
+
+
+def train_and_predict(X_tr, y_tr, X_te, epochs=150, lr=0.002):
+    """Train a fresh MLP and return hard class predictions (argmax of probabilities)."""
+    return train_and_predict_proba(X_tr, y_tr, X_te, epochs, lr).argmax(axis=1)
 
 
 # -- individual analysis -------------------------------------------------------
